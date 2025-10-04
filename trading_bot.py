@@ -474,13 +474,14 @@ def close_all_positions(session: str = "ALL") -> int:
 # SCALING LOGIC
 # =============================================================================
 
-def calculate_scale_levels(range_info: Dict, direction: str) -> List[float]:
+def calculate_scale_levels(range_info: Dict, direction: str, is_reversal: bool = False) -> List[float]:
     """
     Calculate scaling entry prices using vectorized operations
     
     Args:
         range_info: Dictionary with range high/low
         direction: 'BUY' or 'SELL'
+        is_reversal: If True, only use 50% level for scaling
         
     Returns:
         List of price levels for scaling entries
@@ -489,8 +490,12 @@ def calculate_scale_levels(range_info: Dict, direction: str) -> List[float]:
     range_low = range_info['low']
     range_size = range_high - range_low
     
-    # Vectorized calculation of scale levels
-    percentages = np.array(SCALE_LEVELS)
+    # For reversal trades, only scale at 50%
+    # For initial breakout, scale at 75%, 50%, 25%
+    if is_reversal:
+        percentages = np.array([0.50])  # Only 50% level on reversal
+    else:
+        percentages = np.array(SCALE_LEVELS)  # All levels on initial breakout
     
     if direction == 'BUY':
         # For buy, scale levels are below range high going down
@@ -523,7 +528,8 @@ def check_and_execute_scaling(candles: np.ndarray, range_info: Dict,
         
         # Get latest candle
         latest_candle = candles[-1]
-        current_price = latest_candle['close']
+        candle_high = latest_candle['high']
+        candle_low = latest_candle['low']
         direction = breakout_info['direction']
         
         # Calculate TP
@@ -537,12 +543,12 @@ def check_and_execute_scaling(candles: np.ndarray, range_info: Dict,
             triggered = False
             
             if direction == 'BUY':
-                # For buy, trigger when price pulls back to or below level
-                if current_price <= level:
+                # For buy, trigger when candle LOW touches or goes below the level
+                if candle_low <= level:
                     triggered = True
             else:
-                # For sell, trigger when price pulls back to or above level
-                if current_price >= level:
+                # For sell, trigger when candle HIGH touches or goes above the level
+                if candle_high >= level:
                     triggered = True
             
             if triggered:
@@ -652,7 +658,7 @@ def handle_reversal(new_direction: str, range_info: Dict, candles: np.ndarray,
             logger.warning(f"{session} session: 2nd reversal detected - no more entries")
             return None
         
-        # Open new position in opposite direction
+        # Open new position in opposite direction (only on first reversal)
         latest_candle = candles[-1]
         breakout_info = {
             'direction': new_direction,
@@ -828,8 +834,9 @@ def process_morning_session(candles: np.ndarray):
                 )
                 if new_breakout:
                     state.morning_breakout = new_breakout
+                    # For reversal, only scale at 50%
                     state.morning_scale_levels = calculate_scale_levels(
-                        state.morning_range, new_breakout['direction']
+                        state.morning_range, new_breakout['direction'], is_reversal=True
                     )
             else:
                 # Check and execute scaling
@@ -904,8 +911,9 @@ def process_afternoon_session(candles: np.ndarray):
                 )
                 if new_breakout:
                     state.afternoon_breakout = new_breakout
+                    # For reversal, only scale at 50%
                     state.afternoon_scale_levels = calculate_scale_levels(
-                        state.afternoon_range, new_breakout['direction']
+                        state.afternoon_range, new_breakout['direction'], is_reversal=True
                     )
             else:
                 # Check and execute scaling

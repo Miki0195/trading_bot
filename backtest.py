@@ -18,20 +18,20 @@ import json
 
 # Trading Parameters
 SYMBOL = "XAUUSD"
-LOT_SIZE = 0.1
-TP_UNITS = 5.8
+LOT_SIZE = 0.01 #0.1
+TP_UNITS = 580.0 # 58.0
 MAGIC_NUMBER = 234567
 
 # Range Definition Times
-MORNING_RANGE_START = time(12, 0)
-MORNING_RANGE_END = time(12, 15)
-AFTERNOON_RANGE_START = time(18, 30)
-AFTERNOON_RANGE_END = time(18, 45)
+MORNING_RANGE_START = time(10, 0)
+MORNING_RANGE_END = time(10, 15)
+AFTERNOON_RANGE_START = time(16, 30)
+AFTERNOON_RANGE_END = time(16, 45)
 
 # Entry Timing
-MORNING_ENTRY_START = time(12, 15)
-MORNING_ENTRY_CUTOFF = time(18, 29)
-AFTERNOON_ENTRY_START = time(18, 45)
+MORNING_ENTRY_START = time(10, 15)
+MORNING_ENTRY_CUTOFF = time(16, 29)
+AFTERNOON_ENTRY_START = time(16, 45)
 AFTERNOON_EXIT_TIME = time(23, 55)
 
 # Scaling Levels
@@ -226,10 +226,16 @@ class Backtester:
             return breakout_price - tp_distance
     
     def calculate_scale_levels(self, range_high: float, range_low: float, 
-                               direction: str) -> List[float]:
+                               direction: str, is_reversal: bool = False) -> List[float]:
         """Calculate scaling entry prices"""
         range_size = range_high - range_low
-        percentages = np.array(SCALE_LEVELS)
+        
+        # For reversal trades, only scale at 50%
+        # For initial breakout, scale at 75%, 50%, 25%
+        if is_reversal:
+            percentages = np.array([0.50])  # Only 50% level on reversal
+        else:
+            percentages = np.array(SCALE_LEVELS)  # All levels on initial breakout
         
         if direction == "BUY":
             levels = range_high - (percentages * range_size)
@@ -370,8 +376,9 @@ class Backtester:
                         state.breakout_direction = new_direction
                         state.breakout_price = candle['close']
                         state.tp_price = self.calculate_tp(state.breakout_price, new_direction)
+                        # For reversal, only scale at 50%
                         state.scale_levels = self.calculate_scale_levels(
-                            state.range_high, state.range_low, new_direction
+                            state.range_high, state.range_low, new_direction, is_reversal=True
                         )
                         state.executed_scales = []
                         
@@ -492,8 +499,9 @@ class Backtester:
                         state.breakout_direction = new_direction
                         state.breakout_price = candle['close']
                         state.tp_price = self.calculate_tp(state.breakout_price, new_direction)
+                        # For reversal, only scale at 50%
                         state.scale_levels = self.calculate_scale_levels(
-                            state.range_high, state.range_low, new_direction
+                            state.range_high, state.range_low, new_direction, is_reversal=True
                         )
                         state.executed_scales = []
                         
