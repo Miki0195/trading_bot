@@ -1,0 +1,8 @@
+# macOS Compatible Requirements
+# MetaTrader5 package is Windows-only, so we install other dependencies
+numpy>=1.24.0
+pandas>=2.0.0
+
+# Note: You'll need to run MT5 and the trading bot on Windows
+# See MACOS_SETUP.md for options
+
