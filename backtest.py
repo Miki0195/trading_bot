@@ -252,13 +252,16 @@ class Backtester:
             return candle['low'] <= trade.tp_price
     
     def open_trade(self, direction: str, entry_price: float, entry_time: datetime,
-                   tp_price: float, trade_type: str, session: str) -> Trade:
+                   tp_price: float, trade_type: str, session: str, lot_size: float = None) -> Trade:
         """Open a new trade"""
+        if lot_size is None:
+            lot_size = LOT_SIZE
+        
         trade = Trade(
             direction=direction,
             entry_price=entry_price,
             entry_time=entry_time,
-            lot_size=LOT_SIZE,
+            lot_size=lot_size,
             tp_price=tp_price,
             trade_type=trade_type,
             session=session
@@ -371,7 +374,7 @@ class Backtester:
                     self.close_all_session_trades(state, candle['close'], current_time, "REVERSAL")
                     state.reversal_count += 1
                     
-                    # If not max reversals, open new trade
+                    # If not max reversals, open new trade with double lot size
                     if state.reversal_count < 2:
                         state.breakout_direction = new_direction
                         state.breakout_price = candle['close']
@@ -383,7 +386,8 @@ class Backtester:
                         state.executed_scales = []
                         
                         trade = self.open_trade(new_direction, candle['close'], current_time,
-                                               state.tp_price, "REVERSAL", "MORNING")
+                                               state.tp_price, "REVERSAL", "MORNING", 
+                                               lot_size=LOT_SIZE * 2)
                         state.open_trades.append(trade)
                     else:
                         # Max reversals reached, stop trading
@@ -404,8 +408,11 @@ class Backtester:
                             triggered = True
                     
                     if triggered:
+                        # Use double lot size for reversal trades
+                        lot_size = LOT_SIZE * 2 if state.reversal_count >= 1 else LOT_SIZE
                         trade = self.open_trade(state.breakout_direction, level, current_time,
-                                               state.tp_price, "SCALE", "MORNING")
+                                               state.tp_price, "SCALE", "MORNING",
+                                               lot_size=lot_size)
                         state.open_trades.append(trade)
                         state.executed_scales.append(level)
                         logger.info(f"  Morning SCALE: {state.breakout_direction} @ {level:.5f}")
@@ -506,7 +513,8 @@ class Backtester:
                         state.executed_scales = []
                         
                         trade = self.open_trade(new_direction, candle['close'], current_time,
-                                               state.tp_price, "REVERSAL", "AFTERNOON")
+                                               state.tp_price, "REVERSAL", "AFTERNOON",
+                                               lot_size=LOT_SIZE * 2)
                         state.open_trades.append(trade)
                     else:
                         state.breakout_direction = None
@@ -526,8 +534,11 @@ class Backtester:
                             triggered = True
                     
                     if triggered:
+                        # Use double lot size for reversal trades
+                        lot_size = LOT_SIZE * 2 if state.reversal_count >= 1 else LOT_SIZE
                         trade = self.open_trade(state.breakout_direction, level, current_time,
-                                               state.tp_price, "SCALE", "AFTERNOON")
+                                               state.tp_price, "SCALE", "AFTERNOON",
+                                               lot_size=lot_size)
                         state.open_trades.append(trade)
                         state.executed_scales.append(level)
                         logger.info(f"  Afternoon SCALE: {state.breakout_direction} @ {level:.5f}")

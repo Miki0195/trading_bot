@@ -535,6 +535,15 @@ def check_and_execute_scaling(candles: np.ndarray, range_info: Dict,
         # Calculate TP
         tp_price = calculate_tp(breakout_info)
         
+        # Determine if we're in a reversal trade (use 2x lot size)
+        if session == 'MORNING':
+            is_reversal_trade = state.morning_reversal_count >= 1
+        else:
+            is_reversal_trade = state.afternoon_reversal_count >= 1
+        
+        # Use double lot size for reversal trades
+        lot_size = LOT_SIZE * 2 if is_reversal_trade else LOT_SIZE
+        
         # Check each scale level (vectorized)
         remaining_levels = []
         scale_levels_array = np.array(scale_levels)
@@ -555,7 +564,7 @@ def check_and_execute_scaling(candles: np.ndarray, range_info: Dict,
                 # Execute scale-in entry
                 ticket = open_position(
                     direction=direction,
-                    lot_size=LOT_SIZE,
+                    lot_size=lot_size,
                     tp_price=tp_price,
                     comment=f"{session}_SCALE_{level:.5f}"
                 )
@@ -659,6 +668,7 @@ def handle_reversal(new_direction: str, range_info: Dict, candles: np.ndarray,
             return None
         
         # Open new position in opposite direction (only on first reversal)
+        # Use double lot size for reversal trades
         latest_candle = candles[-1]
         breakout_info = {
             'direction': new_direction,
@@ -672,7 +682,7 @@ def handle_reversal(new_direction: str, range_info: Dict, candles: np.ndarray,
         
         ticket = open_position(
             direction=new_direction,
-            lot_size=LOT_SIZE,
+            lot_size=LOT_SIZE * 2,  # Double lot size for reversal
             tp_price=tp_price,
             comment=f"{session}_REVERSAL_{new_direction}"
         )
