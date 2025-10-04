@@ -218,7 +218,7 @@ class Backtester:
     
     def calculate_tp(self, breakout_price: float, direction: str) -> float:
         """Calculate take profit price"""
-        tp_distance = TP_UNITS * self.point * 10
+        tp_distance = TP_UNITS * self.point
         
         if direction == "BUY":
             return breakout_price + tp_distance

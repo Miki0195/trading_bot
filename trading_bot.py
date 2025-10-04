@@ -716,7 +716,7 @@ def calculate_tp(breakout_info: Dict) -> float:
     else:
         point_value = symbol_info['point']
     
-    tp_distance = TP_UNITS * point_value * 10  # Convert units to actual distance
+    tp_distance = TP_UNITS * point_value   # Convert units to actual distance
     
     if direction == 'BUY':
         tp_price = breakout_price + tp_distance
