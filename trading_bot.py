@@ -833,7 +833,15 @@ def process_morning_session(candles: np.ndarray):
         
         # Manage existing morning trades
         if state.morning_breakout is not None:
-            # Check for reversal
+            # Check and execute scaling FIRST (before reversal check)
+            # This ensures that if a candle sweeps through multiple levels and triggers reversal,
+            # all scale positions are opened before being closed by the reversal
+            state.morning_scale_levels = check_and_execute_scaling(
+                candles, state.morning_range, state.morning_breakout,
+                state.morning_scale_levels, 'MORNING'
+            )
+            
+            # Check for reversal AFTER scaling
             reversal_direction = check_reversal(
                 candles, state.morning_range, state.morning_breakout
             )
@@ -848,12 +856,6 @@ def process_morning_session(candles: np.ndarray):
                     state.morning_scale_levels = calculate_scale_levels(
                         state.morning_range, new_breakout['direction'], is_reversal=True
                     )
-            else:
-                # Check and execute scaling
-                state.morning_scale_levels = check_and_execute_scaling(
-                    candles, state.morning_range, state.morning_breakout,
-                    state.morning_scale_levels, 'MORNING'
-                )
         
     except Exception as e:
         logger.error(f"Error in morning session processing: {e}")
@@ -910,7 +912,15 @@ def process_afternoon_session(candles: np.ndarray):
         
         # Manage existing afternoon trades
         if state.afternoon_breakout is not None:
-            # Check for reversal
+            # Check and execute scaling FIRST (before reversal check)
+            # This ensures that if a candle sweeps through multiple levels and triggers reversal,
+            # all scale positions are opened before being closed by the reversal
+            state.afternoon_scale_levels = check_and_execute_scaling(
+                candles, state.afternoon_range, state.afternoon_breakout,
+                state.afternoon_scale_levels, 'AFTERNOON'
+            )
+            
+            # Check for reversal AFTER scaling
             reversal_direction = check_reversal(
                 candles, state.afternoon_range, state.afternoon_breakout
             )
@@ -925,12 +935,6 @@ def process_afternoon_session(candles: np.ndarray):
                     state.afternoon_scale_levels = calculate_scale_levels(
                         state.afternoon_range, new_breakout['direction'], is_reversal=True
                     )
-            else:
-                # Check and execute scaling
-                state.afternoon_scale_levels = check_and_execute_scaling(
-                    candles, state.afternoon_range, state.afternoon_breakout,
-                    state.afternoon_scale_levels, 'AFTERNOON'
-                )
         
     except Exception as e:
         logger.error(f"Error in afternoon session processing: {e}")

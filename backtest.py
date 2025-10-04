@@ -358,7 +358,32 @@ class Backtester:
                     self.close_all_session_trades(state, state.tp_price, current_time, "TP")
                     continue
                 
-                # Check for reversal
+                # Check for scaling FIRST (before reversal check)
+                # This ensures that if a candle sweeps through multiple levels and triggers reversal,
+                # all scale positions are opened before being closed by the reversal
+                for level in state.scale_levels:
+                    if level in state.executed_scales:
+                        continue
+                    
+                    triggered = False
+                    if state.breakout_direction == "BUY":
+                        if candle['low'] <= level:
+                            triggered = True
+                    else:
+                        if candle['high'] >= level:
+                            triggered = True
+                    
+                    if triggered:
+                        # Use double lot size for reversal trades
+                        lot_size = LOT_SIZE * 2 if state.reversal_count >= 1 else LOT_SIZE
+                        trade = self.open_trade(state.breakout_direction, level, current_time,
+                                               state.tp_price, "SCALE", "MORNING",
+                                               lot_size=lot_size)
+                        state.open_trades.append(trade)
+                        state.executed_scales.append(level)
+                        logger.info(f"  Morning SCALE: {state.breakout_direction} @ {level:.5f}")
+                
+                # Check for reversal AFTER scaling
                 reversal = False
                 if state.breakout_direction == "BUY" and candle['close'] < state.range_low:
                     reversal = True
@@ -393,29 +418,6 @@ class Backtester:
                         # Max reversals reached, stop trading
                         state.breakout_direction = None
                     continue
-                
-                # Check for scaling opportunities
-                for level in state.scale_levels:
-                    if level in state.executed_scales:
-                        continue
-                    
-                    triggered = False
-                    if state.breakout_direction == "BUY":
-                        if candle['low'] <= level:
-                            triggered = True
-                    else:
-                        if candle['high'] >= level:
-                            triggered = True
-                    
-                    if triggered:
-                        # Use double lot size for reversal trades
-                        lot_size = LOT_SIZE * 2 if state.reversal_count >= 1 else LOT_SIZE
-                        trade = self.open_trade(state.breakout_direction, level, current_time,
-                                               state.tp_price, "SCALE", "MORNING",
-                                               lot_size=lot_size)
-                        state.open_trades.append(trade)
-                        state.executed_scales.append(level)
-                        logger.info(f"  Morning SCALE: {state.breakout_direction} @ {level:.5f}")
     
     def process_afternoon_session(self, df_day: pd.DataFrame, date: datetime.date):
         """Process afternoon trading session"""
@@ -487,7 +489,32 @@ class Backtester:
                     self.close_all_session_trades(state, state.tp_price, current_time, "TP")
                     continue
                 
-                # Check for reversal
+                # Check for scaling FIRST (before reversal check)
+                # This ensures that if a candle sweeps through multiple levels and triggers reversal,
+                # all scale positions are opened before being closed by the reversal
+                for level in state.scale_levels:
+                    if level in state.executed_scales:
+                        continue
+                    
+                    triggered = False
+                    if state.breakout_direction == "BUY":
+                        if candle['low'] <= level:
+                            triggered = True
+                    else:
+                        if candle['high'] >= level:
+                            triggered = True
+                    
+                    if triggered:
+                        # Use double lot size for reversal trades
+                        lot_size = LOT_SIZE * 2 if state.reversal_count >= 1 else LOT_SIZE
+                        trade = self.open_trade(state.breakout_direction, level, current_time,
+                                               state.tp_price, "SCALE", "AFTERNOON",
+                                               lot_size=lot_size)
+                        state.open_trades.append(trade)
+                        state.executed_scales.append(level)
+                        logger.info(f"  Afternoon SCALE: {state.breakout_direction} @ {level:.5f}")
+                
+                # Check for reversal AFTER scaling
                 reversal = False
                 if state.breakout_direction == "BUY" and candle['close'] < state.range_low:
                     reversal = True
@@ -519,29 +546,6 @@ class Backtester:
                     else:
                         state.breakout_direction = None
                     continue
-                
-                # Check for scaling
-                for level in state.scale_levels:
-                    if level in state.executed_scales:
-                        continue
-                    
-                    triggered = False
-                    if state.breakout_direction == "BUY":
-                        if candle['low'] <= level:
-                            triggered = True
-                    else:
-                        if candle['high'] >= level:
-                            triggered = True
-                    
-                    if triggered:
-                        # Use double lot size for reversal trades
-                        lot_size = LOT_SIZE * 2 if state.reversal_count >= 1 else LOT_SIZE
-                        trade = self.open_trade(state.breakout_direction, level, current_time,
-                                               state.tp_price, "SCALE", "AFTERNOON",
-                                               lot_size=lot_size)
-                        state.open_trades.append(trade)
-                        state.executed_scales.append(level)
-                        logger.info(f"  Afternoon SCALE: {state.breakout_direction} @ {level:.5f}")
     
     def run(self) -> Dict:
         """Run the backtest"""
