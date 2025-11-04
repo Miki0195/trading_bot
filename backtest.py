@@ -19,7 +19,7 @@ import json
 # Trading Parameters
 SYMBOL = "XAUUSD"
 LOT_SIZE = 0.01 #0.1
-TP_UNITS = 580.0 # 58.0
+TP_UNITS = 350.0 # 350.0
 MAGIC_NUMBER = 234567
 
 # Range Definition Times
@@ -485,7 +485,7 @@ class Backtester:
                             # Determine lot size based on scale order
                             if state.reversal_count >= 1:
                                 # For reversal: only 1 scale (50%) with 4x lot size
-                                lot_size = LOT_SIZE * 4
+                                lot_size = LOT_SIZE * 8
                                 # lot_size = LOT_SIZE * 2
                             else:
                                 # For initial breakout: 75%=4x, 50%=3x, 25%=2x
@@ -539,7 +539,7 @@ class Backtester:
                         
                         trade = self.open_trade(new_direction, candle['close'], current_time,
                                                state.tp_price, "REVERSAL", "MORNING",
-                                               lot_size=LOT_SIZE * 2)
+                                               lot_size=LOT_SIZE * 4)
                         state.open_trades.append(trade)
                     else:
                         # Second (or more) opposite breakout: just close all and STOP trading
@@ -677,7 +677,7 @@ class Backtester:
                             # Determine lot size based on scale order
                             if state.reversal_count >= 1:
                                 # For reversal: only 1 scale (50%) with 4x lot size
-                                lot_size = LOT_SIZE * 4
+                                lot_size = LOT_SIZE * 8
                                 # lot_size = LOT_SIZE * 2
                             else:
                                 # For initial breakout: 75%=4x, 50%=3x, 25%=2x
@@ -731,7 +731,7 @@ class Backtester:
                         
                         trade = self.open_trade(new_direction, candle['close'], current_time,
                                                state.tp_price, "REVERSAL", "AFTERNOON",
-                                               lot_size=LOT_SIZE * 2)
+                                               lot_size=LOT_SIZE * 4)
                         state.open_trades.append(trade)
                     else:
                         # Second (or more) opposite breakout: just close all and STOP trading

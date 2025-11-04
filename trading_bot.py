@@ -630,7 +630,7 @@ def check_and_execute_scaling(candles: np.ndarray, range_info: Dict,
                 
                 if is_reversal_trade:
                     # For reversal: only 1 scale (50%) with 4x lot size
-                    lot_size = LOT_SIZE * 4
+                    lot_size = LOT_SIZE * 8
                 else:
                     # For initial breakout - lot sizing based on which level is hit first (closest to breakout)
                     # The level closest to breakout gets smallest lot (2x), deepest gets largest (4x)
@@ -780,7 +780,7 @@ def handle_reversal(new_direction: str, range_info: Dict, candles: np.ndarray,
             
             ticket = open_position(
                 direction=new_direction,
-                lot_size=LOT_SIZE * 2,  # Double lot size for reversal
+                lot_size=LOT_SIZE * 4,  # Double lot size for reversal
                 tp_price=tp_price,
                 comment=f"{session}_REVERSAL_{new_direction}"
             )
