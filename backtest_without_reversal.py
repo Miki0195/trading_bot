@@ -42,9 +42,8 @@ TIMEFRAME = mt5.TIMEFRAME_M5
 INITIAL_BALANCE = 10000.0  # Starting balance for simulation
 
 # Logging
-# Change to logging.DEBUG to see detailed drawdown calculations
 logging.basicConfig(
-    level=logging.DEBUG,  # Set to DEBUG to see detailed trade-by-trade drawdown info
+    level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -306,8 +305,6 @@ class Backtester:
     def calculate_floating_pnl(self, state: SessionState, current_price: float) -> float:
         """Calculate floating profit/loss for open trades in a session"""
         floating_pnl = 0.0
-        trade_details = []
-        
         for trade in state.open_trades:
             if trade.direction == "BUY":
                 pips = (current_price - trade.entry_price) / self.point / 10
@@ -317,28 +314,6 @@ class Backtester:
             pip_value = trade.lot_size * 100
             profit = pips * pip_value
             floating_pnl += profit
-            
-            # Store for debug logging
-            trade_details.append({
-                'type': trade.trade_type,
-                'direction': trade.direction,
-                'entry': trade.entry_price,
-                'current': current_price,
-                'lot_size': trade.lot_size,
-                'pips': pips,
-                'profit': profit
-            })
-        
-        # Log detailed calculation when we have a significant drawdown
-        if floating_pnl < -100:  # Only log when drawdown exceeds $100
-            logger.debug(f"\n  === DRAWDOWN CALCULATION @ Price {current_price:.5f} ===")
-            logger.debug(f"  Open Trades: {len(state.open_trades)}")
-            for i, detail in enumerate(trade_details, 1):
-                logger.debug(f"    Trade {i}: {detail['direction']} {detail['type']} | "
-                           f"Entry: {detail['entry']:.5f} | Lot: {detail['lot_size']:.2f} | "
-                           f"Pips: {detail['pips']:.1f} | P/L: ${detail['profit']:.2f}")
-            logger.debug(f"  TOTAL Floating P/L: ${floating_pnl:.2f}")
-            logger.debug(f"  ===================================")
         
         return floating_pnl
     
@@ -552,12 +527,9 @@ class Backtester:
             if state.open_trades:
                 self.update_session_drawdown(state, candle['high'], candle['low'], candle['close'])
         
-        # Store and log the maximum drawdown for this morning session
+        # Store the maximum drawdown for this morning session
         if state.session_max_drawdown < 0:
             self.morning_session_drawdowns.append(state.session_max_drawdown)
-            logger.info(f"  Morning session MAX DRAWDOWN: ${state.session_max_drawdown:.2f}")
-        elif state.session_start_balance > 0:
-            logger.info(f"  Morning session MAX DRAWDOWN: $0.00 (no drawdown)")
     
     def process_afternoon_session(self, df_day: pd.DataFrame, date: datetime.date):
         """Process afternoon trading session"""
@@ -751,12 +723,9 @@ class Backtester:
             logger.info(f"  Afternoon FORCE CLOSE - End of session (data ended at {last_candle['time_only']}, {len(state.open_trades)} positions still open)")
             self.close_all_session_trades(state, last_candle['close'], last_candle['time'], "SESSION_END")
         
-        # Store and log the maximum drawdown for this afternoon session
+        # Store the maximum drawdown for this afternoon session
         if state.session_max_drawdown < 0:
             self.afternoon_session_drawdowns.append(state.session_max_drawdown)
-            logger.info(f"  Afternoon session MAX DRAWDOWN: ${state.session_max_drawdown:.2f}")
-        elif state.session_start_balance > 0:
-            logger.info(f"  Afternoon session MAX DRAWDOWN: $0.00 (no drawdown)")
     
     def run(self) -> Dict:
         """Run the backtest"""

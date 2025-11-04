@@ -42,9 +42,8 @@ TIMEFRAME = mt5.TIMEFRAME_M5
 INITIAL_BALANCE = 10000.0  # Starting balance for simulation
 
 # Logging
-# Change to logging.DEBUG to see detailed drawdown calculations
 logging.basicConfig(
-    level=logging.DEBUG,  # Set to DEBUG to see detailed trade-by-trade drawdown info
+    level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -124,11 +123,6 @@ class SessionState:
         self.scale_levels: List[float] = []
         self.executed_scales: List[float] = []
         self.open_trades: List[Trade] = []
-        self.session_start_balance: float = 0.0
-        self.session_max_drawdown: float = 0.0
-        self.session_peak_balance: float = 0.0
-        self.initial_breakout_done: bool = False  # Track if initial breakout already happened
-        self.breakout_candle_time: Optional[pd.Timestamp] = None  # Track when breakout candle closed
         
     def reset(self):
         """Reset session state"""
@@ -141,11 +135,6 @@ class SessionState:
         self.scale_levels = []
         self.executed_scales = []
         self.open_trades = []
-        self.session_start_balance = 0.0
-        self.session_max_drawdown = 0.0
-        self.session_peak_balance = 0.0
-        self.breakout_candle_time = None
-        self.initial_breakout_done = False
 
 # =============================================================================
 # BACKTESTING ENGINE
@@ -170,10 +159,6 @@ class Backtester:
         self.closed_trades: List[Trade] = []
         self.daily_equity: List[Dict] = []
         self.balance = INITIAL_BALANCE
-        
-        # Session drawdown tracking
-        self.morning_session_drawdowns: List[float] = []
-        self.afternoon_session_drawdowns: List[float] = []
         
     def initialize(self) -> bool:
         """Initialize MT5 connection"""
@@ -224,7 +209,6 @@ class Backtester:
         range_candles = df[mask]
         
         if len(range_candles) < 3:
-            logger.info(f"  Insufficient candles for range {start_time}-{end_time}: {len(range_candles)} candles (need 3+) - session skipped")
             return None
         
         range_high = range_candles['high'].max()
@@ -286,95 +270,30 @@ class Backtester:
         return trade
     
     def close_trade(self, trade: Trade, exit_price: float, exit_time: datetime, 
-                    exit_reason: str):
+                    exit_reason: str, candle_high: float = None, candle_low: float = None):
         """Close a trade"""
         trade.close(exit_price, exit_time, exit_reason, self.point)
         self.closed_trades.append(trade)
         self.balance += trade.profit
         
+        candle_info = ""
+        if candle_high is not None and candle_low is not None:
+            candle_info = f" | Time: {exit_time} | Candle H:{candle_high:.5f} L:{candle_low:.5f}"
+        
         logger.info(f"  Trade closed: {trade.direction} {trade.trade_type} | "
                    f"Entry: {trade.entry_price:.5f} | Exit: {exit_price:.5f} | "
-                   f"Profit: ${trade.profit:.2f} ({trade.pips:.1f} pips) | {exit_reason}")
+                   f"Profit: ${trade.profit:.2f} ({trade.pips:.1f} pips) | {exit_reason}{candle_info}")
     
     def close_all_session_trades(self, state: SessionState, exit_price: float,
-                                  exit_time: datetime, exit_reason: str):
+                                  exit_time: datetime, exit_reason: str, candle_high: float = None, candle_low: float = None):
         """Close all trades for a session"""
         for trade in state.open_trades:
-            self.close_trade(trade, exit_price, exit_time, exit_reason)
+            self.close_trade(trade, exit_price, exit_time, exit_reason, candle_high, candle_low)
         state.open_trades = []
-    
-    def calculate_floating_pnl(self, state: SessionState, current_price: float) -> float:
-        """Calculate floating profit/loss for open trades in a session"""
-        floating_pnl = 0.0
-        trade_details = []
-        
-        for trade in state.open_trades:
-            if trade.direction == "BUY":
-                pips = (current_price - trade.entry_price) / self.point / 10
-            else:
-                pips = (trade.entry_price - current_price) / self.point / 10
-            
-            pip_value = trade.lot_size * 100
-            profit = pips * pip_value
-            floating_pnl += profit
-            
-            # Store for debug logging
-            trade_details.append({
-                'type': trade.trade_type,
-                'direction': trade.direction,
-                'entry': trade.entry_price,
-                'current': current_price,
-                'lot_size': trade.lot_size,
-                'pips': pips,
-                'profit': profit
-            })
-        
-        # Log detailed calculation when we have a significant drawdown
-        if floating_pnl < -100:  # Only log when drawdown exceeds $100
-            logger.debug(f"\n  === DRAWDOWN CALCULATION @ Price {current_price:.5f} ===")
-            logger.debug(f"  Open Trades: {len(state.open_trades)}")
-            for i, detail in enumerate(trade_details, 1):
-                logger.debug(f"    Trade {i}: {detail['direction']} {detail['type']} | "
-                           f"Entry: {detail['entry']:.5f} | Lot: {detail['lot_size']:.2f} | "
-                           f"Pips: {detail['pips']:.1f} | P/L: ${detail['profit']:.2f}")
-            logger.debug(f"  TOTAL Floating P/L: ${floating_pnl:.2f}")
-            logger.debug(f"  ===================================")
-        
-        return floating_pnl
-    
-    def update_session_drawdown(self, state: SessionState, candle_high: float, candle_low: float, candle_close: float):
-        """Update session drawdown based on floating P/L at WORST price point in candle"""
-        # Check drawdown at BOTH high and low to capture worst moment for open positions
-        # For BUY positions: worst is at candle LOW
-        # For SELL positions: worst is at candle HIGH
-        # We check both to get the most accurate drawdown
-        
-        prices_to_check = [candle_high, candle_low, candle_close]
-        
-        for price in prices_to_check:
-            # Calculate current equity (balance + floating P/L at this price)
-            floating_pnl = self.calculate_floating_pnl(state, price)
-            current_equity = self.balance + floating_pnl
-            
-            # Update peak balance (only from close price, not intra-candle)
-            if price == candle_close and current_equity > state.session_peak_balance:
-                state.session_peak_balance = current_equity
-            
-            # Calculate drawdown from peak
-            drawdown = current_equity - state.session_peak_balance
-            
-            # Update maximum drawdown (most negative value)
-            if drawdown < state.session_max_drawdown:
-                state.session_max_drawdown = drawdown
     
     def process_morning_session(self, df_day: pd.DataFrame, date: datetime.date):
         """Process morning trading session"""
         state = self.morning_state
-        
-        # Initialize session balance tracking
-        state.session_start_balance = self.balance
-        state.session_peak_balance = self.balance
-        state.session_max_drawdown = 0.0
         
         # Calculate range if not done
         if state.range_high is None:
@@ -396,8 +315,8 @@ class Backtester:
             # Check if past entry cutoff for new trades
             can_enter_new = current_time_only <= MORNING_ENTRY_CUTOFF
             
-            # Check for initial breakout (only once per session!)
-            if not state.initial_breakout_done and can_enter_new:
+            # Check for initial breakout
+            if state.breakout_direction is None and can_enter_new:
                 # Check for buy breakout
                 if candle['close'] > state.range_high:
                     state.breakout_direction = "BUY"
@@ -406,16 +325,12 @@ class Backtester:
                     state.scale_levels = self.calculate_scale_levels(
                         state.range_high, state.range_low, "BUY"
                     )
-                    state.initial_breakout_done = True  # Mark that initial breakout happened
-                    state.breakout_candle_time = candle['time']  # Store breakout candle timestamp
                     
                     # Open initial trade
                     trade = self.open_trade("BUY", candle['close'], current_time,
                                            state.tp_price, "INITIAL", "MORNING")
                     state.open_trades.append(trade)
-                    logger.info(f"  Morning BREAKOUT: BUY @ {candle['close']:.5f}, TP: {state.tp_price:.5f}")
-                    # Skip rest of processing for this candle - start fresh on next candle
-                    continue
+                    logger.info(f"  Morning BREAKOUT: BUY @ {candle['close']:.5f}, TP: {state.tp_price:.5f} | Time: {current_time} | Candle H:{candle['high']:.5f} L:{candle['low']:.5f}")
                 
                 # Check for sell breakout
                 elif candle['close'] < state.range_low:
@@ -425,83 +340,54 @@ class Backtester:
                     state.scale_levels = self.calculate_scale_levels(
                         state.range_high, state.range_low, "SELL"
                     )
-                    state.initial_breakout_done = True  # Mark that initial breakout happened
-                    state.breakout_candle_time = candle['time']  # Store breakout candle timestamp
                     
                     # Open initial trade
                     trade = self.open_trade("SELL", candle['close'], current_time,
                                            state.tp_price, "INITIAL", "MORNING")
                     state.open_trades.append(trade)
-                    logger.info(f"  Morning BREAKOUT: SELL @ {candle['close']:.5f}, TP: {state.tp_price:.5f}")
-                    # Skip rest of processing for this candle - start fresh on next candle
-                    continue
+                    logger.info(f"  Morning BREAKOUT: SELL @ {candle['close']:.5f}, TP: {state.tp_price:.5f} | Time: {current_time} | Candle H:{candle['high']:.5f} L:{candle['low']:.5f}")
             
             # Manage existing trades
-            if state.breakout_direction is not None:
-                # Check for TP hit (only if we have open trades)
-                if state.open_trades:
-                    tp_hit = False
-                    for trade in state.open_trades[:]:
-                        if self.check_tp_hit(trade, candle):
-                            self.close_trade(trade, state.tp_price, current_time, "TP")
-                            state.open_trades.remove(trade)
-                            tp_hit = True
-                    
-                    if tp_hit:
-                        # Close all trades when TP is hit
-                        self.close_all_session_trades(state, state.tp_price, current_time, "TP")
-                        # DON'T reset executed_scales - each level should only trigger once per session!
-                        logger.info(f"  TP hit - positions closed, monitoring for remaining scale levels")
-                        # DON'T continue - keep monitoring for pullbacks and reversals!
+            if state.breakout_direction is not None and state.open_trades:
+                # Check for TP hit
+                tp_hit = False
+                for trade in state.open_trades[:]:
+                    if self.check_tp_hit(trade, candle):
+                        self.close_trade(trade, state.tp_price, current_time, "TP", candle['high'], candle['low'])
+                        state.open_trades.remove(trade)
+                        tp_hit = True
+                
+                if tp_hit:
+                    # Close all trades when TP is hit
+                    self.close_all_session_trades(state, state.tp_price, current_time, "TP", candle['high'], candle['low'])
+                    continue
                 
                 # Check for scaling FIRST (before reversal check)
                 # This ensures that if a candle sweeps through multiple levels and triggers reversal,
                 # all scale positions are opened before being closed by the reversal
-                # BUT: Only check scales if we're on a NEW candle (after breakout candle)
-                can_check_scales = True
-                if state.breakout_candle_time is not None:
-                    if candle['time'] <= state.breakout_candle_time:
-                        can_check_scales = False
+                for level in state.scale_levels:
+                    if level in state.executed_scales:
+                        continue
+                    
+                    triggered = False
+                    if state.breakout_direction == "BUY":
+                        if candle['low'] <= level:
+                            triggered = True
+                    else:
+                        if candle['high'] >= level:
+                            triggered = True
+                    
+                    if triggered:
+                        # Use double lot size for reversal trades
+                        lot_size = LOT_SIZE * 2 if state.reversal_count >= 1 else LOT_SIZE
+                        trade = self.open_trade(state.breakout_direction, level, current_time,
+                                               state.tp_price, "SCALE", "MORNING",
+                                               lot_size=lot_size)
+                        state.open_trades.append(trade)
+                        state.executed_scales.append(level)
+                        logger.info(f"  Morning SCALE: {state.breakout_direction} @ {level:.5f} | Time: {current_time} | Candle H:{candle['high']:.5f} L:{candle['low']:.5f}")
                 
-                if can_check_scales:
-                    for level_index, level in enumerate(state.scale_levels):
-                        if level in state.executed_scales:
-                            continue
-                        
-                        triggered = False
-                        if state.breakout_direction == "BUY":
-                            if candle['low'] <= level:
-                                triggered = True
-                        else:
-                            if candle['high'] >= level:
-                                triggered = True
-                        
-                        if triggered:
-                            # Check if still within entry window for morning
-                            if not can_enter_new:
-                                logger.info(f"  Morning: Scale level {level:.5f} triggered but past entry cutoff ({MORNING_ENTRY_CUTOFF}) - skipping")
-                                continue
-                            
-                            # Determine lot size based on scale order
-                            if state.reversal_count >= 1:
-                                # For reversal: only 1 scale (50%) with 4x lot size
-                                lot_size = LOT_SIZE * 4
-                                # lot_size = LOT_SIZE * 2
-                            else:
-                                # For initial breakout: 75%=4x, 50%=3x, 25%=2x
-                                # Reverse the index so deepest pullback gets most size
-                                lot_size = LOT_SIZE * (4 - level_index)  # 0->4x, 1->3x, 2->2x
-                                # lot_size = LOT_SIZE
-
-                            trade = self.open_trade(state.breakout_direction, level, current_time,
-                                                   state.tp_price, "SCALE", "MORNING",
-                                                   lot_size=lot_size)
-                            state.open_trades.append(trade)
-                            state.executed_scales.append(level)
-                            trigger_price = candle['low'] if state.breakout_direction == "BUY" else candle['high']
-                            logger.info(f"  Morning SCALE: {state.breakout_direction} @ {level:.5f} with {lot_size/LOT_SIZE:.1f}x lot (candle {'low' if state.breakout_direction == 'BUY' else 'high'}: {trigger_price:.5f})")
-                
-                # Check for reversal AFTER scaling (only if we have open trades OR no trades yet)
+                # Check for reversal AFTER scaling
                 reversal = False
                 if state.breakout_direction == "BUY" and candle['close'] < state.range_low:
                     reversal = True
@@ -511,21 +397,14 @@ class Backtester:
                     new_direction = "BUY"
                 
                 if reversal:
-                    # Close all existing trades (if any)
-                    if state.open_trades:
-                        self.close_all_session_trades(state, candle['close'], current_time, "REVERSAL")
+                    logger.info(f"  Morning REVERSAL #{state.reversal_count + 1}: {new_direction} | Time: {current_time} | Candle H:{candle['high']:.5f} L:{candle['low']:.5f}")
                     
-                    # Only allow reversals if within entry time window
-                    if not can_enter_new:
-                        logger.info(f"  Morning: Reversal detected but past entry cutoff ({MORNING_ENTRY_CUTOFF}) - positions closed, STOP TRADING")
-                        state.breakout_direction = None  # Stop trading for this session
-                        continue
+                    # Close all existing trades
+                    self.close_all_session_trades(state, candle['close'], current_time, "REVERSAL", candle['high'], candle['low'])
+                    state.reversal_count += 1
                     
-                    # Only allow ONE reversal per session with new positions
-                    if state.reversal_count == 0:
-                        # First reversal: open new positions in opposite direction
-                        logger.info(f"  Morning REVERSAL #1: {new_direction} - opening reversal positions (candle closed @ {candle['close']:.5f}, {'below' if new_direction == 'SELL' else 'above'} range)")
-                        state.reversal_count += 1
+                    # If not max reversals, open new trade with double lot size
+                    if state.reversal_count < 2:
                         state.breakout_direction = new_direction
                         state.breakout_price = candle['close']
                         state.tp_price = self.calculate_tp(state.breakout_price, new_direction)
@@ -533,40 +412,21 @@ class Backtester:
                         state.scale_levels = self.calculate_scale_levels(
                             state.range_high, state.range_low, new_direction, is_reversal=True
                         )
-                        # Reset executed_scales for reversal - it's a NEW direction
-                        # Even if 50% is same price, it's opposite direction so should be allowed
                         state.executed_scales = []
                         
                         trade = self.open_trade(new_direction, candle['close'], current_time,
-                                               state.tp_price, "REVERSAL", "MORNING",
+                                               state.tp_price, "REVERSAL", "MORNING", 
                                                lot_size=LOT_SIZE * 2)
                         state.open_trades.append(trade)
+                        logger.info(f"  Morning REVERSAL TRADE: {new_direction} @ {candle['close']:.5f}, TP: {state.tp_price:.5f} | Time: {current_time} | Candle H:{candle['high']:.5f} L:{candle['low']:.5f}")
                     else:
-                        # Second (or more) opposite breakout: just close all and STOP trading
-                        logger.info(f"  Morning: Second opposite breakout detected (candle closed @ {candle['close']:.5f}) - closing all positions, STOP TRADING")
-                        state.reversal_count += 1
-                        state.breakout_direction = None  # Stop trading for this session
+                        # Max reversals reached, stop trading
+                        state.breakout_direction = None
                     continue
-            
-            # Update session drawdown tracking after processing each candle
-            if state.open_trades:
-                self.update_session_drawdown(state, candle['high'], candle['low'], candle['close'])
-        
-        # Store and log the maximum drawdown for this morning session
-        if state.session_max_drawdown < 0:
-            self.morning_session_drawdowns.append(state.session_max_drawdown)
-            logger.info(f"  Morning session MAX DRAWDOWN: ${state.session_max_drawdown:.2f}")
-        elif state.session_start_balance > 0:
-            logger.info(f"  Morning session MAX DRAWDOWN: $0.00 (no drawdown)")
     
     def process_afternoon_session(self, df_day: pd.DataFrame, date: datetime.date):
         """Process afternoon trading session"""
         state = self.afternoon_state
-        
-        # Initialize session balance tracking
-        state.session_start_balance = self.balance
-        state.session_peak_balance = self.balance
-        state.session_max_drawdown = 0.0
         
         # Calculate range if not done
         if state.range_high is None:
@@ -588,12 +448,12 @@ class Backtester:
             # Force close at exit time
             if current_time_only >= AFTERNOON_EXIT_TIME:
                 if state.open_trades:
-                    logger.info(f"  Afternoon FORCE CLOSE at {AFTERNOON_EXIT_TIME}")
-                    self.close_all_session_trades(state, candle['close'], current_time, "TIME_EXIT")
+                    logger.info(f"  Afternoon FORCE CLOSE at 22:55 | Time: {current_time} | Candle H:{candle['high']:.5f} L:{candle['low']:.5f}")
+                    self.close_all_session_trades(state, candle['close'], current_time, "TIME_EXIT", candle['high'], candle['low'])
                 break
             
-            # Check for initial breakout (only once per session!)
-            if not state.initial_breakout_done:
+            # Check for initial breakout
+            if state.breakout_direction is None:
                 if candle['close'] > state.range_high:
                     state.breakout_direction = "BUY"
                     state.breakout_price = candle['close']
@@ -601,15 +461,11 @@ class Backtester:
                     state.scale_levels = self.calculate_scale_levels(
                         state.range_high, state.range_low, "BUY"
                     )
-                    state.initial_breakout_done = True  # Mark that initial breakout happened
-                    state.breakout_candle_time = candle['time']  # Store breakout candle timestamp
                     
                     trade = self.open_trade("BUY", candle['close'], current_time,
                                            state.tp_price, "INITIAL", "AFTERNOON")
                     state.open_trades.append(trade)
-                    logger.info(f"  Afternoon BREAKOUT: BUY @ {candle['close']:.5f}, TP: {state.tp_price:.5f}")
-                    # Skip rest of processing for this candle - start fresh on next candle
-                    continue
+                    logger.info(f"  Afternoon BREAKOUT: BUY @ {candle['close']:.5f}, TP: {state.tp_price:.5f} | Time: {current_time} | Candle H:{candle['high']:.5f} L:{candle['low']:.5f}")
                 
                 elif candle['close'] < state.range_low:
                     state.breakout_direction = "SELL"
@@ -618,82 +474,52 @@ class Backtester:
                     state.scale_levels = self.calculate_scale_levels(
                         state.range_high, state.range_low, "SELL"
                     )
-                    state.initial_breakout_done = True  # Mark that initial breakout happened
-                    state.breakout_candle_time = candle['time']  # Store breakout candle timestamp
                     
                     trade = self.open_trade("SELL", candle['close'], current_time,
                                            state.tp_price, "INITIAL", "AFTERNOON")
                     state.open_trades.append(trade)
-                    logger.info(f"  Afternoon BREAKOUT: SELL @ {candle['close']:.5f}, TP: {state.tp_price:.5f}")
-                    # Skip rest of processing for this candle - start fresh on next candle
-                    continue
+                    logger.info(f"  Afternoon BREAKOUT: SELL @ {candle['close']:.5f}, TP: {state.tp_price:.5f} | Time: {current_time} | Candle H:{candle['high']:.5f} L:{candle['low']:.5f}")
             
             # Manage existing trades
-            if state.breakout_direction is not None:
-                # Check for TP hit (only if we have open trades)
-                if state.open_trades:
-                    tp_hit = False
-                    for trade in state.open_trades[:]:
-                        if self.check_tp_hit(trade, candle):
-                            self.close_trade(trade, state.tp_price, current_time, "TP")
-                            state.open_trades.remove(trade)
-                            tp_hit = True
-                    
-                    if tp_hit:
-                        # Close all trades when TP is hit
-                        self.close_all_session_trades(state, state.tp_price, current_time, "TP")
-                        # DON'T reset executed_scales - each level should only trigger once per session!
-                        logger.info(f"  TP hit - positions closed, monitoring for remaining scale levels")
-                        # DON'T continue - keep monitoring for pullbacks and reversals!
+            if state.breakout_direction is not None and state.open_trades:
+                # Check for TP hit
+                tp_hit = False
+                for trade in state.open_trades[:]:
+                    if self.check_tp_hit(trade, candle):
+                        self.close_trade(trade, state.tp_price, current_time, "TP", candle['high'], candle['low'])
+                        state.open_trades.remove(trade)
+                        tp_hit = True
+                
+                if tp_hit:
+                    self.close_all_session_trades(state, state.tp_price, current_time, "TP", candle['high'], candle['low'])
+                    continue
                 
                 # Check for scaling FIRST (before reversal check)
                 # This ensures that if a candle sweeps through multiple levels and triggers reversal,
                 # all scale positions are opened before being closed by the reversal
-                # BUT: Only check scales if we're on a NEW candle (after breakout candle)
-                can_check_scales = True
-                if state.breakout_candle_time is not None:
-                    if candle['time'] <= state.breakout_candle_time:
-                        can_check_scales = False
+                for level in state.scale_levels:
+                    if level in state.executed_scales:
+                        continue
+                    
+                    triggered = False
+                    if state.breakout_direction == "BUY":
+                        if candle['low'] <= level:
+                            triggered = True
+                    else:
+                        if candle['high'] >= level:
+                            triggered = True
+                    
+                    if triggered:
+                        # Use double lot size for reversal trades
+                        lot_size = LOT_SIZE * 2 if state.reversal_count >= 1 else LOT_SIZE
+                        trade = self.open_trade(state.breakout_direction, level, current_time,
+                                               state.tp_price, "SCALE", "AFTERNOON",
+                                               lot_size=lot_size)
+                        state.open_trades.append(trade)
+                        state.executed_scales.append(level)
+                        logger.info(f"  Afternoon SCALE: {state.breakout_direction} @ {level:.5f} | Time: {current_time} | Candle H:{candle['high']:.5f} L:{candle['low']:.5f}")
                 
-                if can_check_scales:
-                    for level_index, level in enumerate(state.scale_levels):
-                        if level in state.executed_scales:
-                            continue
-                        
-                        triggered = False
-                        if state.breakout_direction == "BUY":
-                            if candle['low'] <= level:
-                                triggered = True
-                        else:
-                            if candle['high'] >= level:
-                                triggered = True
-                        
-                        if triggered:
-                            # Check if still within trading window for afternoon
-                            if current_time_only >= AFTERNOON_EXIT_TIME:
-                                logger.info(f"  Afternoon: Scale level {level:.5f} triggered but past exit time ({AFTERNOON_EXIT_TIME}) - skipping")
-                                continue
-                            
-                            # Determine lot size based on scale order
-                            if state.reversal_count >= 1:
-                                # For reversal: only 1 scale (50%) with 4x lot size
-                                lot_size = LOT_SIZE * 4
-                                # lot_size = LOT_SIZE * 2
-                            else:
-                                # For initial breakout: 75%=4x, 50%=3x, 25%=2x
-                                # Reverse the index so deepest pullback gets most size
-                                lot_size = LOT_SIZE * (4 - level_index)  # 0->4x, 1->3x, 2->2x
-                                # lot_size = LOT_SIZE
-                            
-                            trade = self.open_trade(state.breakout_direction, level, current_time,
-                                                   state.tp_price, "SCALE", "AFTERNOON",
-                                                   lot_size=lot_size)
-                            state.open_trades.append(trade)
-                            state.executed_scales.append(level)
-                            trigger_price = candle['low'] if state.breakout_direction == "BUY" else candle['high']
-                            logger.info(f"  Afternoon SCALE: {state.breakout_direction} @ {level:.5f} with {lot_size/LOT_SIZE:.1f}x lot (candle {'low' if state.breakout_direction == 'BUY' else 'high'}: {trigger_price:.5f})")
-                
-                # Check for reversal AFTER scaling (only if we have open trades OR no trades yet)
+                # Check for reversal AFTER scaling
                 reversal = False
                 if state.breakout_direction == "BUY" and candle['close'] < state.range_low:
                     reversal = True
@@ -703,21 +529,12 @@ class Backtester:
                     new_direction = "BUY"
                 
                 if reversal:
-                    # Close all existing trades (if any)
-                    if state.open_trades:
-                        self.close_all_session_trades(state, candle['close'], current_time, "REVERSAL")
+                    logger.info(f"  Afternoon REVERSAL #{state.reversal_count + 1}: {new_direction} | Time: {current_time} | Candle H:{candle['high']:.5f} L:{candle['low']:.5f}")
                     
-                    # Check if still within trading window for afternoon
-                    if current_time_only >= AFTERNOON_EXIT_TIME:
-                        logger.info(f"  Afternoon: Reversal detected but past exit time ({AFTERNOON_EXIT_TIME}) - positions closed, STOP TRADING")
-                        state.breakout_direction = None  # Stop trading for this session
-                        continue
+                    self.close_all_session_trades(state, candle['close'], current_time, "REVERSAL", candle['high'], candle['low'])
+                    state.reversal_count += 1
                     
-                    # Only allow ONE reversal per session with new positions
-                    if state.reversal_count == 0:
-                        # First reversal: open new positions in opposite direction
-                        logger.info(f"  Afternoon REVERSAL #1: {new_direction} - opening reversal positions (candle closed @ {candle['close']:.5f}, {'below' if new_direction == 'SELL' else 'above'} range)")
-                        state.reversal_count += 1
+                    if state.reversal_count < 2:
                         state.breakout_direction = new_direction
                         state.breakout_price = candle['close']
                         state.tp_price = self.calculate_tp(state.breakout_price, new_direction)
@@ -725,38 +542,16 @@ class Backtester:
                         state.scale_levels = self.calculate_scale_levels(
                             state.range_high, state.range_low, new_direction, is_reversal=True
                         )
-                        # Reset executed_scales for reversal - it's a NEW direction
-                        # Even if 50% is same price, it's opposite direction so should be allowed
                         state.executed_scales = []
                         
                         trade = self.open_trade(new_direction, candle['close'], current_time,
                                                state.tp_price, "REVERSAL", "AFTERNOON",
                                                lot_size=LOT_SIZE * 2)
                         state.open_trades.append(trade)
+                        logger.info(f"  Afternoon REVERSAL TRADE: {new_direction} @ {candle['close']:.5f}, TP: {state.tp_price:.5f} | Time: {current_time} | Candle H:{candle['high']:.5f} L:{candle['low']:.5f}")
                     else:
-                        # Second (or more) opposite breakout: just close all and STOP trading
-                        logger.info(f"  Afternoon: Second opposite breakout detected (candle closed @ {candle['close']:.5f}) - closing all positions, STOP TRADING")
-                        state.reversal_count += 1
-                        state.breakout_direction = None  # Stop trading for this session
+                        state.breakout_direction = None
                     continue
-            
-            # Update session drawdown tracking after processing each candle
-            if state.open_trades:
-                self.update_session_drawdown(state, candle['high'], candle['low'], candle['close'])
-        
-        # Force close any remaining open trades at end of afternoon session
-        # (In case data doesn't have candles until AFTERNOON_EXIT_TIME)
-        if state.open_trades:
-            last_candle = entry_candles.iloc[-1]
-            logger.info(f"  Afternoon FORCE CLOSE - End of session (data ended at {last_candle['time_only']}, {len(state.open_trades)} positions still open)")
-            self.close_all_session_trades(state, last_candle['close'], last_candle['time'], "SESSION_END")
-        
-        # Store and log the maximum drawdown for this afternoon session
-        if state.session_max_drawdown < 0:
-            self.afternoon_session_drawdowns.append(state.session_max_drawdown)
-            logger.info(f"  Afternoon session MAX DRAWDOWN: ${state.session_max_drawdown:.2f}")
-        elif state.session_start_balance > 0:
-            logger.info(f"  Afternoon session MAX DRAWDOWN: $0.00 (no drawdown)")
     
     def run(self) -> Dict:
         """Run the backtest"""
@@ -886,18 +681,6 @@ class Backtester:
             ('trade_count', 'count')
         ]).round(2)
         
-        # Session drawdown analysis
-        morning_max_dd = min(self.morning_session_drawdowns) if self.morning_session_drawdowns else 0
-        afternoon_max_dd = min(self.afternoon_session_drawdowns) if self.afternoon_session_drawdowns else 0
-        overall_session_max_dd = min(morning_max_dd, afternoon_max_dd)
-        
-        morning_avg_dd = sum(self.morning_session_drawdowns) / len(self.morning_session_drawdowns) if self.morning_session_drawdowns else 0
-        afternoon_avg_dd = sum(self.afternoon_session_drawdowns) / len(self.afternoon_session_drawdowns) if self.afternoon_session_drawdowns else 0
-        
-        # Calculate recommended starting balance (worst session * 3 for safety margin)
-        recommended_balance = abs(overall_session_max_dd) * 3 if overall_session_max_dd < 0 else INITIAL_BALANCE
-        safe_lot_multiplier = INITIAL_BALANCE / recommended_balance if recommended_balance > 0 else 1.0
-        
         # Convert Period objects to strings for JSON serialization
         if 'month' in trades_df.columns:
             trades_df['month'] = trades_df['month'].astype(str)
@@ -921,14 +704,6 @@ class Backtester:
                 'max_drawdown': max_drawdown,
                 'max_drawdown_pct': max_drawdown_pct,
                 'avg_pips_per_trade': trades_df['pips'].mean(),
-                # Session-specific drawdowns
-                'morning_max_session_dd': morning_max_dd,
-                'morning_avg_session_dd': morning_avg_dd,
-                'afternoon_max_session_dd': afternoon_max_dd,
-                'afternoon_avg_session_dd': afternoon_avg_dd,
-                'worst_session_dd': overall_session_max_dd,
-                'recommended_starting_balance': recommended_balance,
-                'safe_lot_size': LOT_SIZE * safe_lot_multiplier,
             },
             'weekday_stats': weekday_stats.to_dict(),
             'monthly_stats': monthly_stats.to_dict(),
@@ -977,24 +752,6 @@ def print_report(stats: Dict):
     print(f"Gross Profit:           ${summary['gross_profit']:,.2f}")
     print(f"Gross Loss:             ${summary['gross_loss']:,.2f}")
     print(f"Average Pips/Trade:     {summary['avg_pips_per_trade']:.1f}")
-    
-    # Session Drawdown Analysis (RISK MANAGEMENT)
-    print("\n⚠️  SESSION DRAWDOWN ANALYSIS (RISK MANAGEMENT)")
-    print("=" * 80)
-    print(f"Morning Session:")
-    print(f"  Max Drawdown:         ${summary['morning_max_session_dd']:,.2f}")
-    print(f"  Avg Drawdown:         ${summary['morning_avg_session_dd']:,.2f}")
-    print(f"\nAfternoon Session:")
-    print(f"  Max Drawdown:         ${summary['afternoon_max_session_dd']:,.2f}")
-    print(f"  Avg Drawdown:         ${summary['afternoon_avg_session_dd']:,.2f}")
-    print(f"\n⚡ WORST SESSION DRAWDOWN: ${summary['worst_session_dd']:,.2f}")
-    print(f"\n💡 RECOMMENDED SETTINGS:")
-    print(f"  Minimum Starting Balance:  ${summary['recommended_starting_balance']:,.2f}")
-    print(f"  Safe Lot Size (current):   {LOT_SIZE}")
-    print(f"  OR use this lot size:      {summary['safe_lot_size']:.2f} (with ${INITIAL_BALANCE:,.2f})")
-    print("\nℹ️  The recommended balance gives you a 3x safety margin against")
-    print("   the worst session drawdown to avoid account wipeout.")
-    print("=" * 80)
     
     # Day of Week Analysis
     print("\n📅 DAY OF WEEK ANALYSIS")

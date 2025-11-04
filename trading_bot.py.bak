@@ -17,39 +17,33 @@ import time as time_module
 
 # Trading Parameters
 SYMBOL = "XAUUSD"  # Trading instrument
-LOT_SIZE = 0.1  # Standard lot size for entries 1
-TP_UNITS = 350.0  # Take profit distance in units (58 pips for 5-digit broker) 1900
+LOT_SIZE = 0.1  # Standard lot size for entries
+TP_UNITS = 5.8  # Take profit distance in units (58 pips for 5-digit broker)
 MAGIC_NUMBER = 234567  # Unique identifier for bot's orders
 
-# Time Zone Offset
-# The bot runs on a VM with timezone offset from broker time
-# These config times are in VM local time, and TIMEZONE_OFFSET_HOURS is added 
-# when comparing with get_current_time() (which returns broker time)
-TIMEZONE_OFFSET_HOURS = 2  # 2 hours offset from MT5 server time
+# Range Definition Times
+MORNING_RANGE_START = time(12, 0)  # Morning range start
+MORNING_RANGE_END = time(12, 15)  # Morning range end (exclusive)
+AFTERNOON_RANGE_START = time(18, 30)  # Afternoon range start
+AFTERNOON_RANGE_END = time(18, 45)  # Afternoon range end (exclusive)x
 
-# Range Definition Times (in VM local time - will be adjusted with offset when used)
-MORNING_RANGE_START = time(7, 0)  # Morning range start (VM: 8:00 = Broker: 10:00)
-MORNING_RANGE_END = time(7, 15)  # Morning range end (VM: 8:15 = Broker: 10:15)
-AFTERNOON_RANGE_START = time(13, 30)  # Afternoon range start (VM: 14:30 = Broker: 16:30)
-AFTERNOON_RANGE_END = time(13, 45)  # Afternoon range end (VM: 14:45 = Broker: 16:45)
-
-# Entry Timing (in VM local time - will be adjusted with offset when used)
-MORNING_ENTRY_START = time(7, 15)  # Earliest morning entry (VM: 8:15 = Broker: 10:15)
-MORNING_ENTRY_CUTOFF = time(13, 29)  # No new morning entries after (VM: 14:29 = Broker: 16:29)
-AFTERNOON_ENTRY_START = time(13, 45)  # Earliest afternoon entry (VM: 14:45 = Broker: 16:45)
-AFTERNOON_EXIT_TIME = time(20, 55)  # Force close afternoon (VM: 23:55 = Broker: 01:55)
+# Entry Timing
+MORNING_ENTRY_START = time(12, 15)  # Earliest morning entry
+MORNING_ENTRY_CUTOFF = time(18, 29)  # No new morning entries after this
+AFTERNOON_ENTRY_START = time(18, 45)  # Earliest afternoon entry
+AFTERNOON_EXIT_TIME = time(23, 55)  # Force close all afternoon trades
 
 # Scaling Levels (pullback percentages into the range)
 SCALE_LEVELS = [0.75, 0.50, 0.25]  # 75%, 50%, 25% retracement levels
 
 # Bot Settings
 TIMEFRAME = mt5.TIMEFRAME_M5  # 5-minute candles
-POLL_INTERVAL = 1  # Seconds between checks
-MAX_SLIPPAGE = 2  # Maximum slippage in points
+POLL_INTERVAL = 10  # Seconds between checks
+MAX_SLIPPAGE = 20  # Maximum slippage in points
 
 # Logging Configuration
 LOG_FILE = "trading_bot.log"
-LOG_LEVEL = logging.DEBUG  # Changed to DEBUG to see detailed time comparisons
+LOG_LEVEL = logging.INFO
 
 # =============================================================================
 # LOGGING SETUP
@@ -84,8 +78,6 @@ class TradingState:
         self.afternoon_positions: List[int] = []
         self.morning_initial_breakout_done: bool = False  # Track if initial breakout happened
         self.afternoon_initial_breakout_done: bool = False
-        self.morning_breakout_candle_time: Optional[pd.Timestamp] = None  # Track when breakout candle closed
-        self.afternoon_breakout_candle_time: Optional[pd.Timestamp] = None
         
     def reset_morning(self):
         """Reset morning session state"""
@@ -95,7 +87,6 @@ class TradingState:
         self.morning_scale_levels = []
         self.morning_positions = []
         self.morning_initial_breakout_done = False
-        self.morning_breakout_candle_time = None
         
     def reset_afternoon(self):
         """Reset afternoon session state"""
@@ -105,7 +96,6 @@ class TradingState:
         self.afternoon_scale_levels = []
         self.afternoon_positions = []
         self.afternoon_initial_breakout_done = False
-        self.afternoon_breakout_candle_time = None
 
 state = TradingState()
 
@@ -197,9 +187,8 @@ def get_range(candles: np.ndarray, start_time: time, end_time: time,
         df = candles_to_dataframe(candles)
         
         # Create datetime objects for filtering
-        # Adjust for timezone offset - candles are in broker time
-        start_dt = datetime.combine(current_date, start_time) + timedelta(hours=TIMEZONE_OFFSET_HOURS)
-        end_dt = datetime.combine(current_date, end_time) + timedelta(hours=TIMEZONE_OFFSET_HOURS)
+        start_dt = datetime.combine(current_date, start_time)
+        end_dt = datetime.combine(current_date, end_time)
         
         # Filter candles in range window (vectorized)
         mask = (df['time'] >= start_dt) & (df['time'] < end_dt)
@@ -249,19 +238,10 @@ def check_breakout(candles: np.ndarray, range_info: Dict,
     try:
         df = candles_to_dataframe(candles)
         
-        # IMPORTANT: Exclude the last candle (currently forming) in live trading
-        # The last candle's "close" is actually the current price, not a closed candle!
-        # We only want to check COMPLETED candles that have actually closed
-        if len(df) > 1:
-            df = df.iloc[:-1]  # Remove last (current) candle
-        
         # Filter candles after entry start time
-        # Adjust for timezone offset - candles are in broker time
-        entry_dt = datetime.combine(current_date, entry_start_time) + timedelta(hours=TIMEZONE_OFFSET_HOURS)
-        logger.debug(f"check_breakout: current_date={current_date}, entry_start_time={entry_start_time}, entry_dt={entry_dt}, OFFSET={TIMEZONE_OFFSET_HOURS}h")
+        entry_dt = datetime.combine(current_date, entry_start_time)
         mask = df['time'] >= entry_dt
         entry_candles = df[mask]
-        logger.debug(f"check_breakout: Found {len(entry_candles)} COMPLETED candles after entry_dt")
         
         if len(entry_candles) == 0:
             return None
@@ -269,10 +249,10 @@ def check_breakout(candles: np.ndarray, range_info: Dict,
         range_high = range_info['high']
         range_low = range_info['low']
         
-        # Vectorized breakout detection  
-        # Buy breakout: CLOSED candle above range high
+        # Vectorized breakout detection
+        # Buy breakout: close above range high
         buy_breakout_mask = entry_candles['close'] > range_high
-        # Sell breakout: CLOSED candle below range low
+        # Sell breakout: close below range low
         sell_breakout_mask = entry_candles['close'] < range_low
         
         # Find first breakout
@@ -550,26 +530,7 @@ def check_and_execute_scaling(candles: np.ndarray, range_info: Dict,
         if not scale_levels:
             return scale_levels
         
-        # Get the breakout candle time for this session
-        if session == 'MORNING':
-            breakout_candle_time = state.morning_breakout_candle_time
-        else:
-            breakout_candle_time = state.afternoon_breakout_candle_time
-        
-        # Only check scales if we have candles AFTER the breakout candle
-        # This ensures scaling only starts on NEW candles, not the same candle that triggered breakout
-        if breakout_candle_time is not None:
-            df = pd.DataFrame(candles)
-            df = df.iloc[:-1]  # Exclude the currently forming candle
-            if not df.empty:
-                last_completed_candle_time = df.iloc[-1]['time']
-                if last_completed_candle_time <= breakout_candle_time:
-                    # We're still on the same or earlier candle as the breakout - don't check scales yet
-                    logger.debug(f"{session}: Waiting for new candle after breakout (breakout: {breakout_candle_time}, current: {last_completed_candle_time})")
-                    return scale_levels
-        
-        # Get latest candle (FORMING candle - we want to monitor touches in real-time)
-        # For scaling, we check the high/low of the CURRENT forming candle
+        # Get latest candle
         latest_candle = candles[-1]
         candle_high = latest_candle['high']
         candle_low = latest_candle['low']
@@ -610,17 +571,6 @@ def check_and_execute_scaling(candles: np.ndarray, range_info: Dict,
                     triggered = True
             
             if triggered:
-                # Check if still within entry window for this session
-                if session == "MORNING":
-                    if not can_enter_morning_trade():
-                        logger.info(f"Morning: Scale level {level:.5f} triggered but past entry cutoff - skipping")
-                        remaining_levels.append(level)
-                        continue
-                elif session == "AFTERNOON":
-                    if not can_enter_afternoon_trade():
-                        logger.info(f"Afternoon: Scale level {level:.5f} triggered but past exit time - skipping")
-                        remaining_levels.append(level)
-                        continue
                 # Determine lot size based on scale order
                 # Find the index of this level in the full original list
                 try:
@@ -632,11 +582,8 @@ def check_and_execute_scaling(candles: np.ndarray, range_info: Dict,
                     # For reversal: only 1 scale (50%) with 4x lot size
                     lot_size = LOT_SIZE * 4
                 else:
-                    # For initial breakout - lot sizing based on which level is hit first (closest to breakout)
-                    # The level closest to breakout gets smallest lot (2x), deepest gets largest (4x)
-                    # BUY levels: [12.5, 15, 17.5] - hit order: 17.5(2x), 15(3x), 12.5(4x)
-                    # SELL levels: [17.5, 15, 12.5] - hit order: 12.5(2x), 15(3x), 17.5(4x)
-                    # Both use same formula: deepest in list gets most lot size
+                    # For initial breakout: 75%=4x, 50%=3x, 25%=2x
+                    # Reverse the index so deepest pullback gets most size
                     lot_size = LOT_SIZE * (4 - level_index)  # 0->4x, 1->3x, 2->2x
                 
                 # Execute scale-in entry
@@ -681,32 +628,23 @@ def check_reversal(candles: np.ndarray, range_info: Dict,
         'BUY' or 'SELL' if reversal detected, None otherwise
     """
     try:
-        # IMPORTANT: Exclude the last candle (currently forming)
-        # We only check the last COMPLETED candle for reversal
-        if len(candles) < 2:
-            return None
-        
-        # Get all completed candles (exclude the forming one)
-        completed_candles = candles[:-1]
-        
-        # Check the most recent COMPLETED candle
-        last_completed_candle = completed_candles[-1]
-        close_price = last_completed_candle['close']
+        latest_candle = candles[-1]
+        close_price = latest_candle['close']
         current_direction = breakout_info['direction']
         
         range_high = range_info['high']
         range_low = range_info['low']
         
-        # Check for opposite breakout (candle must CLOSE beyond range)
+        # Check for opposite breakout
         if current_direction == 'BUY':
-            # Check if candle CLOSED below range low
+            # Check if price broke below range low
             if close_price < range_low:
-                logger.info(f"REVERSAL DETECTED: Candle closed below {range_low:.5f} (closed at {close_price:.5f})")
+                logger.info(f"REVERSAL DETECTED: Price broke below {range_low:.5f}")
                 return 'SELL'
         else:
-            # Check if candle CLOSED above range high
+            # Check if price broke above range high
             if close_price > range_high:
-                logger.info(f"REVERSAL DETECTED: Candle closed above {range_high:.5f} (closed at {close_price:.5f})")
+                logger.info(f"REVERSAL DETECTED: Price broke above {range_high:.5f}")
                 return 'BUY'
         
         return None
@@ -846,97 +784,51 @@ def calculate_tp(breakout_info: Dict) -> float:
 # TIME MANAGEMENT
 # =============================================================================
 
-def get_adjusted_time() -> time:
-    """
-    Get current time adjusted for timezone offset.
-    
-    When VM system time is 8:00 and TIMEZONE_OFFSET_HOURS is 2,
-    this returns 10:00 to match the market data timezone.
-    """
-    now = datetime.now()
-    adjusted = now + timedelta(hours=TIMEZONE_OFFSET_HOURS)
-    return adjusted.time()
-
-def add_hours_to_time(t: time, hours: int) -> time:
-    """
-    Add hours to a time object and return new time.
-    
-    Args:
-        t: time object
-        hours: hours to add
-        
-    Returns:
-        New time object with hours added (wraps around midnight if needed)
-    """
-    # Convert time to datetime (using arbitrary date), add hours, extract time
-    temp_dt = datetime.combine(datetime.today(), t)
-    adjusted_dt = temp_dt + timedelta(hours=hours)
-    return adjusted_dt.time()
-
 def get_current_time() -> time:
     """Get current time (using system time)"""
-    return get_adjusted_time()
+    return datetime.now().time()
 
 def get_current_date() -> datetime.date:
-    """Get current date adjusted for timezone offset"""
-    now = datetime.now()
-    adjusted = now + timedelta(hours=TIMEZONE_OFFSET_HOURS)
-    return adjusted.date()
+    """Get current date"""
+    return datetime.now().date()
 
 def is_trading_day() -> bool:
     """Check if today is a trading day (Monday-Friday)"""
-    now = datetime.now()
-    adjusted = now + timedelta(hours=TIMEZONE_OFFSET_HOURS)
-    weekday = adjusted.weekday()
+    weekday = datetime.now().weekday()
     return weekday < 5  # Monday=0, Friday=4
 
 def should_calculate_morning_range() -> bool:
     """Check if we should calculate morning range"""
     current_time = get_current_time()
-    adjusted_range_end = add_hours_to_time(MORNING_RANGE_END, TIMEZONE_OFFSET_HOURS)
-    should_calc = (current_time >= adjusted_range_end and 
-                   current_time < time(23, 59) and
-                   state.morning_range is None)
-    # logger.debug(f"should_calculate_morning_range: current_time={current_time}, RANGE_END={adjusted_range_end}, should_calc={should_calc}")
-    return should_calc
+    return (current_time >= MORNING_RANGE_END and 
+            current_time < time(23, 59) and
+            state.morning_range is None)
 
 def should_calculate_afternoon_range() -> bool:
     """Check if we should calculate afternoon range"""
     current_time = get_current_time()
-    adjusted_range_end = add_hours_to_time(AFTERNOON_RANGE_END, TIMEZONE_OFFSET_HOURS)
-    should_calc = (current_time >= adjusted_range_end and 
-                   current_time < time(23, 59) and
-                   state.afternoon_range is None)
-    # logger.debug(f"should_calculate_afternoon_range: current_time={current_time}, RANGE_END={adjusted_range_end}, should_calc={should_calc}")
-    return should_calc
+    return (current_time >= AFTERNOON_RANGE_END and 
+            current_time < time(23, 59) and
+            state.afternoon_range is None)
 
 def can_enter_morning_trade() -> bool:
     """Check if new morning trades can be entered"""
     current_time = get_current_time()
-    adjusted_entry_start = add_hours_to_time(MORNING_ENTRY_START, TIMEZONE_OFFSET_HOURS)
-    adjusted_entry_cutoff = add_hours_to_time(MORNING_ENTRY_CUTOFF, TIMEZONE_OFFSET_HOURS)
-    can_enter = (current_time >= adjusted_entry_start and 
-                 current_time <= adjusted_entry_cutoff and
-                 state.morning_reversal_count < 2)
-    logger.debug(f"can_enter_morning_trade: current_time={current_time}, ENTRY_START={adjusted_entry_start}, CUTOFF={adjusted_entry_cutoff}, can_enter={can_enter}")
-    return can_enter
+    return (current_time >= MORNING_ENTRY_START and 
+            current_time <= MORNING_ENTRY_CUTOFF and
+            state.morning_reversal_count < 2)
 
 def can_enter_afternoon_trade() -> bool:
     """Check if new afternoon trades can be entered"""
     current_time = get_current_time()
-    adjusted_entry_start = add_hours_to_time(AFTERNOON_ENTRY_START, TIMEZONE_OFFSET_HOURS)
-    adjusted_exit_time = add_hours_to_time(AFTERNOON_EXIT_TIME, TIMEZONE_OFFSET_HOURS)
-    can_enter = (current_time >= adjusted_entry_start and 
-                 current_time < adjusted_exit_time and
-                 state.afternoon_reversal_count < 2)
-    logger.debug(f"can_enter_afternoon_trade: current_time={current_time}, ENTRY_START={adjusted_entry_start}, EXIT_TIME={adjusted_exit_time}, can_enter={can_enter}")
-    return can_enter
+    return (current_time >= AFTERNOON_ENTRY_START and 
+            current_time < AFTERNOON_EXIT_TIME and
+            state.afternoon_reversal_count < 2)
 
 def should_force_close_afternoon() -> bool:
     """Check if we should force close afternoon positions"""
     current_time = get_current_time()
-    adjusted_exit_time = add_hours_to_time(AFTERNOON_EXIT_TIME, TIMEZONE_OFFSET_HOURS)
-    return current_time >= adjusted_exit_time
+    return current_time >= AFTERNOON_EXIT_TIME
 
 # =============================================================================
 # MAIN TRADING LOOP
@@ -946,13 +838,6 @@ def process_morning_session(candles: np.ndarray):
     """Process morning trading session logic"""
     try:
         current_date = get_current_date()
-        current_time = get_current_time()
-        
-        # Skip morning session if we're past the entry cutoff (already in afternoon or evening)
-        adjusted_cutoff = add_hours_to_time(MORNING_ENTRY_CUTOFF, TIMEZONE_OFFSET_HOURS)
-        if current_time > adjusted_cutoff and state.morning_range is None:
-            logger.debug(f"Skipping morning session - past cutoff time (current: {current_time}, cutoff: {adjusted_cutoff})")
-            return
         
         # Calculate range if needed
         if state.morning_range is None and should_calculate_morning_range():
@@ -963,11 +848,9 @@ def process_morning_session(candles: np.ndarray):
                 logger.info("Morning range calculated")
         
         # Check for initial breakout (only once per session!)
-        logger.debug(f"Morning breakout check: range={state.morning_range is not None}, initial_done={state.morning_initial_breakout_done}")
         if (state.morning_range is not None and 
             not state.morning_initial_breakout_done and 
             can_enter_morning_trade()):
-            logger.info("Morning: Checking for breakout...")
             
             breakout = check_breakout(
                 candles, state.morning_range, MORNING_ENTRY_START, current_date
@@ -976,13 +859,6 @@ def process_morning_session(candles: np.ndarray):
             if breakout:
                 # Mark that initial breakout happened
                 state.morning_initial_breakout_done = True
-                
-                # Store the timestamp of the breakout candle (last completed candle)
-                df = pd.DataFrame(candles)
-                df = df.iloc[:-1]  # Exclude forming candle
-                if not df.empty:
-                    state.morning_breakout_candle_time = df.iloc[-1]['time']
-                    logger.info(f"Morning breakout candle time: {state.morning_breakout_candle_time}")
                 
                 # Calculate TP and open initial position
                 tp_price = calculate_tp(breakout)
@@ -1002,8 +878,6 @@ def process_morning_session(candles: np.ndarray):
                         state.morning_range, breakout['direction']
                     )
                     logger.info(f"Morning breakout: {breakout['direction']}, Scale levels: {state.morning_scale_levels}")
-                    # Return early - don't check scaling on the same candle as breakout
-                    return
         
         # Manage existing morning trades
         if state.morning_breakout is not None:
@@ -1050,21 +924,13 @@ def process_afternoon_session(candles: np.ndarray):
     """Process afternoon trading session logic"""
     try:
         current_date = get_current_date()
-        current_time = get_current_time()
         
         # Force close if past exit time
-        adjusted_exit = add_hours_to_time(AFTERNOON_EXIT_TIME, TIMEZONE_OFFSET_HOURS)
         if should_force_close_afternoon():
             if state.afternoon_positions:
-                logger.info(f"Force closing all afternoon positions - past exit time ({current_time} >= {adjusted_exit})")
+                logger.info("22:55 - Force closing all afternoon positions")
                 close_all_positions(session='AFTERNOON')
                 state.afternoon_positions = []
-            logger.debug(f"Skipping afternoon session - past exit time (current: {current_time}, exit: {adjusted_exit})")
-            return
-        
-        # Skip afternoon session if we're past the exit time and no range calculated yet
-        if current_time >= adjusted_exit and state.afternoon_range is None:
-            logger.debug(f"Skipping afternoon session - too late to start (current: {current_time}, exit: {adjusted_exit})")
             return
         
         # Calculate range if needed
@@ -1076,11 +942,9 @@ def process_afternoon_session(candles: np.ndarray):
                 logger.info("Afternoon range calculated")
         
         # Check for initial breakout (only once per session!)
-        logger.debug(f"Afternoon breakout check: range={state.afternoon_range is not None}, initial_done={state.afternoon_initial_breakout_done}")
         if (state.afternoon_range is not None and 
             not state.afternoon_initial_breakout_done and 
             can_enter_afternoon_trade()):
-            logger.info("Afternoon: Checking for breakout...")
             
             breakout = check_breakout(
                 candles, state.afternoon_range, AFTERNOON_ENTRY_START, current_date
@@ -1089,13 +953,6 @@ def process_afternoon_session(candles: np.ndarray):
             if breakout:
                 # Mark that initial breakout happened
                 state.afternoon_initial_breakout_done = True
-                
-                # Store the timestamp of the breakout candle (last completed candle)
-                df = pd.DataFrame(candles)
-                df = df.iloc[:-1]  # Exclude forming candle
-                if not df.empty:
-                    state.afternoon_breakout_candle_time = df.iloc[-1]['time']
-                    logger.info(f"Afternoon breakout candle time: {state.afternoon_breakout_candle_time}")
                 
                 # Calculate TP and open initial position
                 tp_price = calculate_tp(breakout)
@@ -1115,8 +972,6 @@ def process_afternoon_session(candles: np.ndarray):
                         state.afternoon_range, breakout['direction']
                     )
                     logger.info(f"Afternoon breakout: {breakout['direction']}, Scale levels: {state.afternoon_scale_levels}")
-                    # Return early - don't check scaling on the same candle as breakout
-                    return
         
         # Manage existing afternoon trades
         if state.afternoon_breakout is not None:
@@ -1193,16 +1048,12 @@ def main_loop():
             # Check for new day
             check_new_day()
             
-            # Get latest candles (fetch enough to cover full trading day)
-            candles = get_candles(SYMBOL, TIMEFRAME, count=1500)
+            # Get latest candles
+            candles = get_candles(SYMBOL, TIMEFRAME, count=100)
             if candles is None:
                 logger.warning("Failed to retrieve candles, retrying...")
                 time_module.sleep(POLL_INTERVAL)
                 continue
-            
-            # Log current adjusted time for debugging
-            current_time = get_current_time()
-            logger.debug(f"=== Bot loop iteration: VM time + {TIMEZONE_OFFSET_HOURS}h offset = {current_time} ===")
             
             # Process morning session
             process_morning_session(candles)
